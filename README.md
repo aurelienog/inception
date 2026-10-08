@@ -6,6 +6,39 @@
 
 ## Description
 
+```
+                         Internet / navegador
+                                  │
+                                  │ HTTPS :443
+                                  ▼
+                         ┌─────────────────┐
+                         │      NGINX      │
+                         │ TLS 1.2 / 1.3   │
+                         └────────┬────────┘
+                                  │
+                                  │ FastCGI
+                                  ▼
+                         ┌─────────────────┐
+                         │    WORDPRESS    │
+                         │    PHP-FPM      │
+                         └────────┬────────┘
+                                  │
+                                  │ MariaDB :3306
+                                  ▼
+                         ┌─────────────────┐
+                         │     MARIADB     │
+                         └─────────────────┘
+
+             Docker network: inception
+             
+             Persistent data:
+             ├── WordPress files
+             └── MariaDB database
+
+
+Internet → :443 → NGINX → WordPress → MariaDB
+```
+
 ## Instructions
 
 ## Resources
@@ -37,8 +70,6 @@
 [Container & Ip](https://www.freecodecamp.org/espanol/news/como-obtener-la-direccion-ip-de-un-contenedor-docker-explicado-con-ejemplos/)
 [Environment variables](https://docs.docker.com/compose/how-tos/environment-variables/)
 [Secrets](https://docs.docker.com/engine/swarm/secrets/)
-[Distroless images](https://docs.docker.com/dhi/explore/security-concepts/distroless/)
-[Wasm workloads](https://docs.docker.com/desktop/features/wasm/)
 
 ### NGINX
 [NGINX](https://nginx.org/index.html)
@@ -57,6 +88,77 @@
 [Docker tips](https://www.youtube.com/watch?v=EzUDAQGNUk8)
 
 ## Project description
+
+### Main choices
+
+### MariaDB
+
+```
+              Container
+            ┌─────────────┐
+            │   MariaDB   │
+            │             │
+            │ /var/lib/   │
+            │    mysql    │
+            └──────┬──────┘
+                   │
+                   ▼
+             Docker volume
+                   │
+                   ▼
+           /home/aunoguei/data/
+                  mariadb
+```
+
+```
+WordPress
+    │
+    │ consultas SQL
+    ▼
+ mariadbd
+    │
+    ▼
+ datos
+```
+
+DROP PRIVILEGES :
+```
+                    DOCKER
+                       │
+                       │ docker run
+                       ▼
+              ┌─────────────────┐
+              │       PID 1     │
+              │ init-mariadb.sh │
+              │                 │
+              │     usuario     │
+              │       root      │
+              └────────┬────────┘
+                       │
+                       │ prepara
+                       │
+                       ├── /var/lib/mysql
+                       ├── permisos
+                       ├── configuración
+                       └── inicialización
+                       │
+                       │ cambia privilegios
+                       ▼
+              ┌─────────────────┐
+              │     mariadbd    │
+              │                 │
+              │ usuario: mysql  │
+              │      PID 1      │
+              └────────┬────────┘
+                       │
+                       ▼
+                 MariaDB server
+```
+mariadbd → el servidor MariaDB (d = daemon)
+mysql → usuario Linux con pocos privilegios que ejecuta el servidor
+exec → reemplaza el proceso de inicialización por el proceso real, permitiendo que mariadbd sea el proceso principal del contenedor.
+
+
 
  explain the use of Docker and the sources
 included in the project. It must indicate the main design choices, as well as a
@@ -130,8 +232,10 @@ pero rompe un poco la isolation
 
 Named volume: managed by docker -> production
 
-bind mounts: map a specific directory on your host to a directory inside the container -> local development
+bind mounts: map a specific directory on your host to a directory inside the container -> local development . Docker does not manage directly that volume
 
+Bind mount: ./something:/var/lib/mysql
+Named volume: mariadb:/var/lib/mysql
 ```
 
 
@@ -320,17 +424,19 @@ TIPS:
 multiple stages inside 1 dockerfile.
 The first stage installs everything for building the app, compile it
 the second stage grabs the output and copies it into a fresh clean image.
+```
+Dockerfile
+   │
+   ├── Stage 1: builder
+   │
+   └── Stage 2: runtime
+              │
+              ▼
+            IMAGE
+```
 
 3. Add health checks to tell docker how to verify the container is healthy so orchastration tools like swarm or kubernetes can use these status to restart failing containers or reroot traffic
 
 4. configure restart policies if a container exit with an error
 
 5. docker config similar a secrets but for non sensitive data, html template, json_data... It mounts as a file in /config/
-
-6. tls certificates to secure?
-
-7. in production:
-    - use minimal base images to reduce attack surface
-    - never run containers as root
-    - enable resource limits (cpus, memory) in Dockerfile
-    - log to stdout/stderr 
