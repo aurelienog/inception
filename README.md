@@ -1,8 +1,393 @@
 *This project has been created as part of the 42 curriculum by aunoguei.*
 
+# Inception
+
+## Table of Contents
+
+- [Description](#description)
+- [Project Description](#project-description)
+- [Architecture](#architecture)
+- [Instructions](#instructions)
+- [MariaDB Service](#mariadb-service)
+- [Main Technical Choices](#main-technical-choices)
+- [Virtual Machines vs Docker](#virtual-machines-vs-docker)
+- [Secrets vs Environment Variables](#secrets-vs-environment-variables)
+- [Docker Network vs Host Network](#docker-network-vs-host-network)
+- [Docker Volumes vs Bind Mounts](#docker-volumes-vs-bind-mounts)
+- [Resources](#resources)
+- [AI Usage](#ai-usage)
+
+## Description
+
+Inception is a system administration project from the 42 curriculum. Its goal is to introduce containerization by building a small infrastructure using Docker and Docker Compose.
+
+Instead of relying on ready-made application images, each required service is built from its own Dockerfile and configured to perform a specific role.
+
+The intended infrastructure consists of three services:
+
+- **NGINX:** the public HTTPS entry point, configured to support TLS 1.2 and TLS 1.3.
+- **WordPress with PHP-FPM:** the website and its PHP application runtime, without an additional NGINX server inside the container.
+- **MariaDB:** the relational database used by WordPress.
+
+The services communicate through a dedicated Docker network. Persistent data is stored outside the containers so that recreating a container does not automatically erase the website or database data.
+
+## Project Description
+
+Docker packages applications and their dependencies into images. Containers run those images as isolated processes while sharing the host operating system kernel.
+
+Docker Compose describes the services, networks, volumes, build contexts, secrets and runtime configuration in a single YAML file.
+
+The project source files are organized as follows:
+
+```text
+inception/
+├── Makefile
+├── README.md
+├── USER_DOC.md
+├── DEV_DOC.md
+├── .gitignore
+├── secrets/
+│   ├── db_password.txt
+│   ├── db_root_password.txt
+│   └── credentials.txt
+└── srcs/
+    ├── .env
+    ├── docker-compose.yml
+    └── requirements/
+        ├── mariadb/
+        │   ├── Dockerfile
+        │   └── tools/
+        │       └── init-mariadb.sh
+        ├── nginx/
+        └── wordpress/
+```
+
+The NGINX and WordPress directories contain their respective Dockerfiles, configuration files and initialization scripts as those services are implemented.
+
+Sensitive files must not be committed to version control. The root `.gitignore` excludes `srcs/.env` and the `secrets/` directory.
+
+## Architecture
+
+The target architecture is:
+
+```text
+                 Browser
+                    |
+                 HTTPS :443
+                    |
+                    v
+              +-----------+
+              |   NGINX   |
+              +-----+-----+
+                    |
+                 FastCGI
+                    |
+                    v
+              +-----------+
+              | WordPress |
+              |  PHP-FPM  |
+              +-----+-----+
+                    |
+                 SQL :3306
+                    |
+                    v
+              +-----------+
+              |  MariaDB  |
+              +-----------+
+
+           Dedicated Docker network
+
+Persistent host data:
+  /home/aunoguei/data/
+  ├── mariadb/
+  └── wordpress/
+```
+
+Only NGINX is intended to publish a port to the host. WordPress and MariaDB communicate through the internal Docker network.
+
+## Instructions
+
+### Prerequisites
+
+- A Linux virtual machine.
+- Docker Engine.
+- Docker Compose.
+- GNU Make.
+- A working internet connection for downloading build dependencies.
+
+### Configuration
+
+The Compose environment file is located at `srcs/.env`. It contains non-secret configuration such as:
+
+- `MYSQL_DATABASE`
+- `MYSQL_USER`
+- `DOMAIN_NAME`
+- WordPress account names and email addresses
+
+Database passwords are stored in files under `secrets/`. These files must exist before starting MariaDB and must not be committed to Git.
+
+The MariaDB service currently expects:
+
+```text
+secrets/db_root_password.txt
+secrets/db_password.txt
+```
+
+### Build and start MariaDB
+
+From the repository root:
+
+```bash
+make prepare
+make up
+```
+
+The preparation target creates the host data directories if they do not exist. The `up` target builds the images and starts the configured services.
+
+To start MariaDB directly with Docker Compose:
+
+```bash
+docker compose -f srcs/docker-compose.yml up -d --build mariadb
+```
+
+### Check the service
+
+```bash
+docker compose -f srcs/docker-compose.yml ps
+docker compose -f srcs/docker-compose.yml logs mariadb
+```
+
+The log message `ready for connections` indicates that the database server has started successfully.
+
+To list the databases without displaying the password:
+
+```bash
+docker exec mariadb sh -c \
+'mariadb -u root -p"$(cat /run/secrets/db_root_password)" -e "SHOW DATABASES;"'
+```
+
+### Stop the services
+
+```bash
+make down
+```
+
+Stopping the stack removes the Compose containers and network, but does not intentionally delete the persistent database files.
+
+**Do not remove the database directory or its Docker volume to perform a normal restart.**
+
+## MariaDB Service
+
+The MariaDB image is built from `debian:12`, rather than using a prebuilt MariaDB application image.
+
+The Dockerfile installs:
+
+- `mariadb-server`
+- `gosu`, used to start the database server under the dedicated Linux `mysql` account
+
+The initialization script, `init-mariadb.sh`, performs the following operations:
+
+1. Creates the runtime directory `/run/mysqld` and assigns it to the `mysql` user.
+2. Checks whether the MariaDB data directory has already been initialized.
+3. Initializes the data directory on first startup.
+4. Reads the root and application database passwords from Docker secret files.
+5. Starts a temporary local MariaDB server to perform the initial SQL configuration.
+6. Creates the application database and user, grants the required database privileges, and configures the root password.
+7. Stops the temporary server.
+8. Starts the normal MariaDB server using `exec gosu mysql mariadbd`.
+
+The temporary server uses a Unix socket and disables TCP networking during initialization. This allows the initialization SQL to run before the normal database server starts.
+
+The final `exec` replaces the shell process with MariaDB. This allows the database server to become the container's main process and receive container lifecycle signals directly.
+
+Initialization is conditional: an existing initialized data directory is reused instead of being initialized again.
+
+The database is not published on a host port. Other services on the Compose network will be able to connect to the MariaDB service using its service name and TCP port `3306`.
+
+## Main Technical Choices
+
+### Custom images
+
+Each application service has its own build context and Dockerfile. This makes the software installed, the startup procedure and the configuration explicit.
+
+Image tags use explicit versions rather than `latest`.
+
+### Process management
+
+The container runs the application process directly instead of relying on an infinite shell loop to keep the container alive.
+
+For MariaDB, the entrypoint script prepares the database and then uses `exec` to start the server as the main process.
+
+### Persistent storage
+
+The MariaDB data directory inside the container is `/var/lib/mysql`.
+
+The Compose volume named `mariadb` is configured with the local driver and these options:
+
+```yaml
+driver: local
+driver_opts:
+  type: none
+  o: bind
+  device: /home/aunoguei/data/mariadb
+```
+
+This keeps the database files in the required host directory while using a Docker-managed named volume in Compose.
+
+This configuration uses a bind mount internally to connect the host directory to the Docker volume. It should not be confused with a volume stored exclusively in Docker's default volume directory.
+
+### Network isolation
+
+A dedicated bridge network allows services to resolve each other by their Compose service names. MariaDB does not need a published host port for communication with WordPress.
+
+### Restart policy
+
+The MariaDB service uses `restart: on-failure`, so Docker attempts to restart it when its process exits with an error.
+
+## Virtual Machines vs Docker
+
+| Virtual Machines | Docker |
+|---|---|
+| Each VM runs its own guest operating system and kernel. | Containers share the host kernel. |
+| Usually requires more memory and storage. | Usually has lower overhead for application services. |
+| Provides a separate OS environment and stronger isolation boundaries in some configurations. | Provides process, filesystem and network isolation, but shares the host kernel. |
+| Useful when different operating systems or kernel environments are required. | Useful for packaging, reproducing and deploying individual services. |
+
+This project runs inside a virtual machine and uses Docker inside that VM. The VM provides the project environment; Docker isolates and manages the application services within it.
+
+## Secrets vs Environment Variables
+
+Environment variables are convenient for non-sensitive configuration such as database names, service settings and domain names. They are easy to pass through Docker Compose.
+
+Passwords should not be placed in Dockerfiles, committed to Git or embedded in image layers.
+
+Docker secrets are provided to the service as files, allowing the initialization script to read credentials from `/run/secrets/`. In this project, the secret sources are local files referenced by Docker Compose.
+
+Local Compose secrets are not automatically equivalent to encrypted secret storage. File permissions, host security and repository exclusions are still important.
+
+The project therefore uses environment variables for ordinary configuration and secret files for database passwords.
+
+## Docker Network vs Host Network
+
+### Dedicated bridge network
+
+Containers attached to a user-defined bridge network can communicate through Docker's internal networking. Compose services can use service names instead of fixed IP addresses.
+
+Advantages include:
+
+- Separation from unrelated containers.
+- Service-name DNS resolution.
+- No need to publish internal service ports to the host.
+
+This project uses a dedicated bridge network for NGINX, WordPress and MariaDB.
+
+### Host network
+
+With host networking, a container shares the host's network namespace. Port publishing is generally unnecessary, and the container has less network isolation from the host.
+
+The project uses a dedicated Docker network instead of host networking.
+
+## Docker Volumes vs Bind Mounts
+
+### Named volumes
+
+Named volumes are managed by Docker and can persist independently of container lifecycles. They are convenient for application data.
+
+Example:
+
+```yaml
+volumes:
+  - mariadb:/var/lib/mysql
+```
+
+### Bind mounts
+
+Bind mounts map a specific host path directly into a container.
+
+Example:
+
+```yaml
+volumes:
+  - /home/aunoguei/data/mariadb:/var/lib/mysql
+```
+
+They provide explicit control over the host location but require careful handling of permissions and path existence.
+
+### This project's storage configuration
+
+The project uses named Docker volumes with local-driver options that reference fixed host directories under `/home/aunoguei/data/`.
+
+This allows Docker Compose to manage named volumes while keeping the data at the required host paths. Because the local driver uses `o: bind`, the underlying storage mechanism still relies on a bind mount.
+
+## Resources
+
+### Docker and Compose
+
+- [Docker documentation](https://docs.docker.com/)
+- [Docker images](https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-an-image/)
+- [Docker containers](https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/)
+- [Docker Compose](https://docs.docker.com/compose/)
+- [Compose file reference](https://docs.docker.com/reference/compose-file/)
+- [Docker networking](https://docs.docker.com/engine/network/)
+- [Docker volumes](https://docs.docker.com/engine/storage/volumes/)
+- [Compose environment variables](https://docs.docker.com/compose/how-tos/environment-variables/)
+
+### MariaDB and SQL
+
+- [MariaDB documentation](https://mariadb.com/docs/)
+- [MariaDB account management](https://mariadb.com/docs/server/reference/sql-statements/account-management-sql-statements)
+- [MariaDB GRANT statement](https://mariadb.com/docs/server/reference/sql-statements/account-management-sql-statements/grant)
+- [SQLBolt interactive SQL lessons](https://sqlbolt.com/)
+
+### Linux and processes
+
+- [Linux processes](https://www.geeksforgeeks.org/linux-unix/processes-in-linuxunix/)
+- [Linux namespaces](https://medium.com/@teddyking/linux-namespaces-850489d3ccf)
+- [Linux control groups](https://medium.com/@dmosyan/linux-cgroups-explained-how-containers-use-it-c99eebb8c9c6)
+
+### NGINX and WordPress
+
+- [NGINX documentation](https://nginx.org/en/docs/)
+- [NGINX beginner's guide](https://nginx.org/en/docs/beginners_guide.html)
+- [PHP-FPM documentation](https://www.php.net/install.fpm)
+- [WordPress administration documentation](https://developer.wordpress.org/advanced-administration/)
+
+## AI Usage
+
+AI tools were used as learning and development support during this project. They helped explain Docker and Linux concepts, review the MariaDB initialization procedure, troubleshoot container startup and database access, and improve the project documentation.
+
+AI-assisted explanations and suggestions were reviewed against the actual configuration and command output. The implementation was tested by building the MariaDB image, starting the container, checking its logs, verifying the database and users, and inspecting the persistent volume configuration.
+
+AI was used as an aid rather than as a substitute for understanding, testing or validating the implementation.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # INCEPTION
 
 ## Table of Contents
+
+
 
 ## Description
 
@@ -54,6 +439,7 @@ Internet → :443 → NGINX → WordPress → MariaDB
 [Signals](https://dev.to/axisinfo_0a61830e06c3c950/understanding-process-signals-in-linux-5gb)
 [Cgroups](https://medium.com/@dmosyan/linux-cgroups-explained-how-containers-use-it-c99eebb8c9c6)
 [Namespaces](https://medium.com/@teddyking/linux-namespaces-850489d3ccf)
+[Unix Sockets](https://www.geeksforgeeks.org/linux-unix/understanding-unix-sockets/)
 
 ### Docker concepts
 [Guide](https://liora.io/docker-guide-complet)
@@ -158,7 +544,41 @@ mariadbd → el servidor MariaDB (d = daemon)
 mysql → usuario Linux con pocos privilegios que ejecuta el servidor
 exec → reemplaza el proceso de inicialización por el proceso real, permitiendo que mariadbd sea el proceso principal del contenedor.
 
+socket necessary:
+```
+mariadb (cliente)
+      │
+      │ Unix socket
+      ▼
+/run/mysqld/mysqld.sock
+      │
+      ▼
+mariadbd (servidor)
 
+---
+
+root
+ │
+ ├── mkdir /run/mysqld
+ │
+ └── chown mysql:mysql /run/mysqld
+             │
+             ▼
+           mysql
+             │
+             └── mariadbd
+```
+la imagen mariadb:test ya contiene una base de datos inicializada por el paquete de Debian.
+Por ejemplo:
+- ibdata1 e ib_logfile0: archivos relacionados con el almacenamiento y la recuperación de InnoDB.
+- mysql/: contiene las tablas internas del sistema, incluidas las relacionadas con usuarios y permisos.
+- performance_schema/ y sys/: bases de datos del sistema.
+
+
+Un socket Unix permite que dos procesos del mismo sistema se comuniquen sin utilizar una conexión TCP. Más adelante lo usamos para conectarnos al servidor temporal.
+
+
+¿Por qué arranca un servidor temporal? MariaDB necesita estar funcionando para poder ejecutar las instrucciones SQL que crean la base de datos y los usuarios. El servidor temporal se utiliza para configurar el sistema antes de iniciar el servidor definitivo.
 
  explain the use of Docker and the sources
 included in the project. It must indicate the main design choices, as well as a

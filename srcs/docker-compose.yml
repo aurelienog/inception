@@ -17,14 +17,24 @@ services:
     restart: on-failure
     networks:
       - inception
+    volumes:
+      - wordpress:/var/www/html
 
   mariadb:
+    image: mariadb:1.0
     container_name: mariadb
     build:
       context: ./requirements/mariadb
     restart: on-failure
     networks:
       - inception
+    secrets:
+      - db_root_password
+      - db_password
+    env_file:
+      - .env
+    volumes:
+      - mariadb:/var/lib/mysql
 
 networks:
   inception:
@@ -32,4 +42,22 @@ networks:
 
 volumes:
   wordpress:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /home/aunoguei/data/wordpress
+
   mariadb:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /home/aunoguei/data/mariadb
+
+
+secrets:
+  db_root_password:
+    file: ../secrets/db_root_password.txt
+  db_password:
+    file: ../secrets/db_password.txt
