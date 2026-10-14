@@ -1,6 +1,13 @@
 #!/bin/sh
 set -eu
 
+for secret in /run/secrets/db_root_password /run/secrets/db_password; do
+    if [ ! -s "$secret" ]; then
+        echo "ERROR: Required secret is missing or empty: $secret" >&2
+        exit 1
+    fi
+done
+
 DATADIR="/var/lib/mysql"
 SOCKET="/run/mysqld/mysqld-init.sock"
 
