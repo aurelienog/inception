@@ -3,8 +3,13 @@ FROM debian:12
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         nginx \
-        openssl  \
+        openssl \
+        adminer \
     && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /var/www/adminer && \
+    cp -a /usr/share/adminer/adminer/. /var/www/adminer/ && \
+    cp -a /usr/share/adminer/externals /var/www/adminer/
 
 RUN mkdir -p /etc/nginx/ssl && \
     openssl req -x509 -nodes -days 365 \
